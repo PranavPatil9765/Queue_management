@@ -1,73 +1,175 @@
 <?php
+include 'db.php'; // Ensure this includes the database connection
+
 $username = $_POST['username'] ?? '';
 $action = $_POST['action'] ?? '';
-$queueName = $_POST['queue'] ?? '';
-$newQueue = $_POST['new_queue'] ?? '';
+$queueName = $_POST['queue'] ?? ''; // Use the 'queue' parameter here for actions like join/leave/next
+$newQueue = $_POST['new_queue'] ?? ''; // New queue creation
+$location = $_POST['location'] ?? '';
+$timings = $_POST['timings'] ?? '';
+$description = $_POST['description'] ?? '';
 
-$jsonFile = 'data/queues.json';
-if (!file_exists($jsonFile)) {
-    file_put_contents($jsonFile, json_encode([]));
+// Ensure the action is properly set
+if ($action === 'delete') {
+    // Ensure the queue belongs to the current user (owner)
+    $queueName = $_POST['queue'] ?? '';
+
+    // Fetch queue details
+    $stmt = $conn->prepare("SELECT owner FROM queues WHERE name = ?");
+    $stmt->bind_param("s", $queueName);
+    $stmt->execute();
+    $stmt->store_result();
+    $stmt->bind_result($owner);
+    $stmt->fetch();
+
+    if ($owner === $username) {
+        // Delete the queue from the database
+        $deleteStmt = $conn->prepare("DELETE FROM queues WHERE name = ?");
+        $deleteStmt->bind_param("s", $queueName);
+        $deleteStmt->execute();
+        $deleteStmt->close();
+
+        // Redirect to the queue management page after successful deletion
+        header("Location: queues.php?user=" . urlencode($username));
+        exit();
+    } else {
+        echo "You are not the owner of this queue. <a href='queues.php?user=" . urlencode($username) . "'>Go back</a>";
+        exit();
+    }
 }
-$queues = json_decode(file_get_contents($jsonFile), true);
 
-// Connect to MySQL
-$mysqli = new mysqli("localhost", "root", "", "queue_db");
-if ($mysqli->connect_error) {
-    die("Connection failed: " . $mysqli->connect_error);
-}
+if ($action === 'create' && $newQueue) {
+    // Check if queue already exists in DB
+    $stmt = $conn->prepare("SELECT * FROM queues WHERE name = ?");
+    $stmt->bind_param("s", $newQueue);
+    $stmt->execute();
+    $result = $stmt->get_result();
 
-if ($action === 'create') {
-    if (!isset($queues[$newQueue])) {
-        // JSON
-        $queues[$newQueue] = ['owner' => $username, 'members' => []];
-
-        // SQL
-        $stmt = $mysqli->prepare("INSERT INTO queues (name, owner) VALUES (?, ?)");
-        $stmt->bind_param("ss", $newQueue, $username);
+    if ($result->num_rows == 0) {
+        // Insert new queue into the database
+        $stmt = $conn->prepare("INSERT INTO queues (name, owner, location, timings, description, members) VALUES (?, ?, ?, ?, ?, ?)");
+        $members = ''; // No members at the start
+        $stmt->bind_param("ssssss", $newQueue, $username, $location, $timings, $description, $members);
         $stmt->execute();
         $stmt->close();
-    }
 
+        header("Location: queues.php?user=" . urlencode($username));
+        exit();
+    } else {
+        echo "Queue with this name already exists. <a href='queues.php?user=" . urlencode($username) . "'>Go back</a>";
+        exit();
+    }
 } elseif ($action === 'join') {
-    if (!in_array($username, $queues[$queueName]['members'])) {
-        // JSON
-        $queues[$queueName]['members'][] = $username;
+    // Add user to queue
+    $stmt = $conn->prepare("SELECT members FROM queues WHERE name = ?");
+    $stmt->bind_param("s", $queueName);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $queueData = $result->fetch_assoc();
 
-        // SQL
-        $stmt = $mysqli->prepare("INSERT INTO queue_members (queue_name, member_name) VALUES (?, ?)");
-        $stmt->bind_param("ss", $queueName, $username);
+    if ($queueData) {
+        $members = $queueData['members'];
+        if (!empty($members)) {
+            $membersArray = explode(',', $members);
+        } else {
+            $membersArray = [];
+        }
+
+        // Prevent joining if already a member
+        if (in_array($username, $membersArray)) {
+            echo "You are already in the queue. <a href='queues.php?user=" . urlencode($username) . "'>Go back</a>";
+            exit();
+        }
+
+        // Add user to the queue's members
+        $membersArray[] = $username;
+        $updatedMembers = implode(',', $membersArray);
+
+        // Update the queue in the DB with the new member list
+        $stmt = $conn->prepare("UPDATE queues SET members = ? WHERE name = ?");
+        $stmt->bind_param("ss", $updatedMembers, $queueName);
         $stmt->execute();
         $stmt->close();
-    }
 
+        header("Location: queues.php?user=" . urlencode($username));
+        exit();
+    } else {
+        echo "Queue does not exist. <a href='queues.php?user=" . urlencode($username) . "'>Go back</a>";
+        exit();
+    }
 } elseif ($action === 'leave') {
-    if (($key = array_search($username, $queues[$queueName]['members'])) !== false) {
-        // JSON
-        unset($queues[$queueName]['members'][$key]);
-        $queues[$queueName]['members'] = array_values($queues[$queueName]['members']);
+    // Remove user from queue
+    $stmt = $conn->prepare("SELECT members FROM queues WHERE name = ?");
+    $stmt->bind_param("s", $queueName);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $queueData = $result->fetch_assoc();
 
-        // SQL
-        $stmt = $mysqli->prepare("DELETE FROM queue_members WHERE queue_name = ? AND member_name = ?");
-        $stmt->bind_param("ss", $queueName, $username);
-        $stmt->execute();
-        $stmt->close();
+    if ($queueData) {
+        $members = $queueData['members'];
+        if (!empty($members)) {
+            $membersArray = explode(',', $members);
+            $index = array_search($username, $membersArray);
+
+            if ($index !== false) {
+                // Remove the user from the queue
+                unset($membersArray[$index]);
+                $updatedMembers = implode(',', $membersArray);
+
+                // Update the queue in the DB with the new member list
+                $stmt = $conn->prepare("UPDATE queues SET members = ? WHERE name = ?");
+                $stmt->bind_param("ss", $updatedMembers, $queueName);
+                $stmt->execute();
+                $stmt->close();
+
+                header("Location: queues.php?user=" . urlencode($username));
+                exit();
+            } else {
+                echo "You are not in the queue. <a href='queues.php?user=" . urlencode($username) . "'>Go back</a>";
+                exit();
+            }
+        } else {
+            echo "Queue is empty. <a href='queues.php?user=" . urlencode($username) . "'>Go back</a>";
+            exit();
+        }
+    } else {
+        echo "Queue does not exist. <a href='queues.php?user=" . urlencode($username) . "'>Go back</a>";
+        exit();
     }
-
 } elseif ($action === 'next') {
-    if ($queues[$queueName]['owner'] === $username && count($queues[$queueName]['members']) > 0) {
-        $removed = array_shift($queues[$queueName]['members']);
+    // Remove the first member from the queue (if the user is the owner)
+    $stmt = $conn->prepare("SELECT members FROM queues WHERE name = ? AND owner = ?");
+    $stmt->bind_param("ss", $queueName, $username);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $queueData = $result->fetch_assoc();
 
-        // SQL
-        $stmt = $mysqli->prepare("DELETE FROM queue_members WHERE queue_name = ? AND member_name = ? LIMIT 1");
-        $stmt->bind_param("ss", $queueName, $removed);
-        $stmt->execute();
-        $stmt->close();
+    if ($queueData) {
+        $members = $queueData['members'];
+        if (!empty($members)) {
+            $membersArray = explode(',', $members);
+            array_shift($membersArray); // Remove the first member
+
+            $updatedMembers = implode(',', $membersArray);
+
+            // Update the queue in the DB with the new member list
+            $stmt = $conn->prepare("UPDATE queues SET members = ? WHERE name = ?");
+            $stmt->bind_param("ss", $updatedMembers, $queueName);
+            $stmt->execute();
+            $stmt->close();
+
+            header("Location: queues.php?user=" . urlencode($username));
+            exit();
+        } else {
+            echo "No members in the queue. <a href='queues.php?user=" . urlencode($username) . "'>Go back</a>";
+            exit();
+        }
+    } else {
+        echo "Queue does not exist or you are not the owner. <a href='queues.php?user=" . urlencode($username) . "'>Go back</a>";
+        exit();
     }
+} else {
+    echo "Invalid action. <a href='queues.php?user=" . urlencode($username) . "'>Go back</a>";
+    exit();
 }
-
-// Save JSON
-file_put_contents($jsonFile, json_encode($queues));
-
-// Redirect back
-header("Location: queues.php?user=" . urlencode($username));
-exit();
+?>
